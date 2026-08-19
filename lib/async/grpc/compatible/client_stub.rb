@@ -6,6 +6,7 @@
 require "async/grpc"
 require "async/http/endpoint"
 require "async/http/protocol/http2"
+require "base64"
 require "grpc"
 require "protocol/grpc/body/readable"
 require "protocol/grpc/body/writable"
@@ -194,7 +195,7 @@ module Async
 					body.write(payload)
 					body.close_write
 					
-					headers = Protocol::GRPC::Metadata.build(
+					headers = build_headers(
 						metadata: normalize_metadata(metadata),
 						timeout: timeout,
 						content_type: "application/grpc+proto"
@@ -221,8 +222,41 @@ module Async
 					return if status == Protocol::GRPC::Status::OK
 					
 					details = Protocol::GRPC::Metadata.extract_message(response.headers)
-					metadata = Protocol::GRPC::Metadata.extract(response.headers)
+					metadata = extract_metadata(response.headers)
 					raise_bad_status(status, details, metadata)
+				end
+				
+				def build_headers(metadata:, timeout:, content_type:)
+					headers = Protocol::HTTP::Headers.new(policy: Protocol::GRPC::HEADER_POLICY)
+					headers["content-type"] = content_type
+					headers["te"] = "trailers"
+					headers["grpc-timeout"] = timeout if timeout
+					
+					metadata.each do |key, value|
+						headers[key] = if key.end_with?("-bin")
+							Base64.strict_encode64(value)
+						else
+							value.to_s
+						end
+					end
+					
+					return headers
+				end
+				
+				def extract_metadata(headers)
+					metadata = {}
+					
+					headers.to_h.each do |key, value|
+						next if key.start_with?("grpc-") || key == "content-type" || key == "te"
+						
+						if key.end_with?("-bin")
+							value = value.map{|item| Base64.strict_decode64(item)}
+						end
+						
+						metadata[key] = value
+					end
+					
+					return metadata
 				end
 				
 				def normalize_method(method)

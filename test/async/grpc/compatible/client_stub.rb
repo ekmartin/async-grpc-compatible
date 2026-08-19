@@ -6,6 +6,7 @@
 require "async/grpc/compatible"
 require "async/grpc/dispatcher"
 require "async/grpc/service"
+require "base64"
 require "sus/fixtures/async/http"
 
 class CompatibleMessage
@@ -37,6 +38,8 @@ class CompatibleService < Async::GRPC::Service
 		
 		case request.value
 		when "error"
+			call.response.headers["x-error"] = "metadata"
+			call.response.headers["x-error-bin"] = Base64.strict_encode64("binary metadata")
 			Protocol::GRPC::Metadata.assign_status!(
 				call.response.headers,
 				status: Protocol::GRPC::Status::NOT_FOUND,
@@ -47,7 +50,9 @@ class CompatibleService < Async::GRPC::Service
 			output.write(CompatibleMessage.new("slow"))
 		else
 			metadata = call.request.headers["x-test"]&.first
-			output.write(CompatibleMessage.new([request.value, metadata].compact.join(":")))
+			binary_metadata = call.request.headers["x-test-bin"]&.first
+			binary_metadata = Base64.strict_decode64(binary_metadata) if binary_metadata
+			output.write(CompatibleMessage.new([request.value, metadata, binary_metadata].compact.join(":")))
 		end
 	end
 end
@@ -157,10 +162,24 @@ describe Async::GRPC::Compatible::ClientStub do
 		expect(response.value).to be == "Hello:metadata"
 	end
 	
+	it "sends binary metadata" do
+		response = request("Hello", metadata: {"x-test-bin" => "binary metadata"})
+		
+		expect(response.value).to be == "Hello:binary metadata"
+	end
+	
 	it "raises grpc-ruby errors" do
-		expect do
+		begin
 			request("error")
-		end.to raise_exception(::GRPC::NotFound, message: be =~ /Missing/)
+		rescue ::GRPC::NotFound => error
+			expect(error.message).to be =~ /Missing/
+			expect(error.metadata).to be == {
+				"x-error" => ["metadata"],
+				"x-error-bin" => ["binary metadata"],
+			}
+		else
+			expect(false).to be == true
+		end
 	end
 	
 	it "enforces deadlines" do

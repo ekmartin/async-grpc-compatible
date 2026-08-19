@@ -34,6 +34,7 @@ group :test do
 	gem "rubocop-socketry"
 	
 	gem "sus-fixtures-async-http"
+	gem "localhost"
 	
 	gem "bake-test"
 	gem "bake-test-external"

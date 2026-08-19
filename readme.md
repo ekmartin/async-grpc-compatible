@@ -14,7 +14,8 @@ Select the compatible stub when constructing a generated client:
 require "async/grpc/compatible"
 
 stub_class = Async::GRPC::Compatible::ClientStub
-stub = stub_class.new("grpc.example.com:443", GRPC::Core::ChannelCredentials.new)
+credentials = Async::GRPC::Compatible::ChannelCredentials.new
+stub = stub_class.new("grpc.example.com:443", credentials)
 
 response = stub.request_response(
 	"/example.Service/Get",
@@ -35,6 +36,18 @@ end
 
 That configuration API is illustrative and will require a corresponding NuevoProtobuf change.
 
+Custom trust roots and mutual TLS use the same positional credential arguments as grpc-ruby, while retaining the certificate material so it can be translated into `IO::Endpoint::TLS::Configuration`:
+
+``` ruby
+credentials = Async::GRPC::Compatible::ChannelCredentials.new(
+	root_certificates,
+	client_private_key,
+	client_certificate_chain,
+)
+```
+
+Native `GRPC::Core::ChannelCredentials` remain accepted for ordinary TLS. grpc-ruby does not expose the certificate material stored in native credentials, so custom roots and client identities must use the compatible credential class.
+
 ## Current Compatibility
 
 The initial implementation supports:
@@ -44,6 +57,7 @@ The initial implementation supports:
   - Custom marshal and unmarshal callables.
   - Request metadata and deadlines.
   - Insecure and standard TLS endpoints.
+  - Custom TLS root certificates and mutual TLS client identities.
   - Translation of gRPC failures into `GRPC::BadStatus` subclasses.
 
 The following are not yet supported:
@@ -52,7 +66,7 @@ The following are not yet supported:
   - Client, server, or bidirectional streaming.
   - grpc-ruby interceptors.
   - Parent call propagation and per-call credentials.
-  - Custom TLS root certificates, client certificates, and native channel overrides.
+  - Native channel overrides.
   - grpc-ruby channel arguments beyond accepting the compatible constructor parameter.
   - Non-DNS resolvers such as Unix sockets and xDS.
 

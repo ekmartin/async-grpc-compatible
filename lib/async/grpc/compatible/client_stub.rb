@@ -46,7 +46,7 @@ module Async
 				# Construct a compatible channel.
 				# @parameter channel_override [Channel, Async::GRPC::Client | Nil] An existing compatible channel or client.
 				# @parameter host [String] The gRPC target.
-				# @parameter credentials [GRPC::Core::ChannelCredentials, Symbol] The channel credentials.
+				# @parameter credentials [ChannelCredentials, GRPC::Core::ChannelCredentials, Symbol] The channel credentials.
 				# @parameter channel_arguments [Hash] gRPC channel arguments.
 				# @returns [Channel] The compatible channel.
 				def self.setup_channel(channel_override, host, credentials, channel_arguments = {})
@@ -67,7 +67,7 @@ module Async
 				
 				# Construct an HTTP/2 endpoint for a gRPC target.
 				# @parameter host [String] The gRPC target.
-				# @parameter credentials [GRPC::Core::ChannelCredentials, Symbol] The channel credentials.
+				# @parameter credentials [ChannelCredentials, GRPC::Core::ChannelCredentials, Symbol] The channel credentials.
 				# @parameter channel_arguments [Hash] gRPC channel arguments.
 				# @returns [Async::HTTP::Endpoint] The HTTP/2 endpoint.
 				def self.endpoint_for(host, credentials, channel_arguments = {})
@@ -82,20 +82,36 @@ module Async
 						url = "#{scheme}://#{target}"
 					end
 					
-					Async::HTTP::Endpoint.parse(url, protocol: Async::HTTP::Protocol::HTTP2)
+					Async::HTTP::Endpoint.parse(
+						url,
+						protocol: Async::HTTP::Protocol::HTTP2,
+						tls_configuration: tls_configuration_for(credentials),
+					)
 				end
 				
 				# Determine the URL scheme for the given credentials.
-				# @parameter credentials [GRPC::Core::ChannelCredentials, Symbol] The channel credentials.
+				# @parameter credentials [ChannelCredentials, GRPC::Core::ChannelCredentials, Symbol] The channel credentials.
 				# @returns [String] Either `"http"` or `"https"`.
 				def self.scheme_for(credentials)
 					return "http" if credentials == INSECURE_CREDENTIALS
 					
-					if credentials.is_a?(::GRPC::Core::ChannelCredentials)
+					if credentials.is_a?(ChannelCredentials) || credentials.is_a?(::GRPC::Core::ChannelCredentials)
 						return "https"
 					end
 					
 					raise TypeError, "credentials must be GRPC channel credentials or :this_channel_is_insecure"
+				end
+				
+				# Extract a transport-neutral TLS configuration from readable compatible credentials.
+				# Native grpc-ruby credentials are opaque, so they continue to use the default Async HTTP TLS configuration.
+				# @parameter credentials [ChannelCredentials, GRPC::Core::ChannelCredentials, Symbol] The channel credentials.
+				# @returns [IO::Endpoint::TLS::Configuration | Nil] The TLS configuration, if available.
+				def self.tls_configuration_for(credentials)
+					if credentials.is_a?(ChannelCredentials)
+						return credentials.tls_configuration
+					end
+					
+					return nil
 				end
 				
 				# Normalize a grpc-ruby target into an HTTP authority.
@@ -115,7 +131,7 @@ module Async
 				
 				# Create a compatible client stub.
 				# @parameter host [String] The gRPC target.
-				# @parameter credentials [GRPC::Core::ChannelCredentials, Symbol, Nil] The channel credentials.
+				# @parameter credentials [ChannelCredentials, GRPC::Core::ChannelCredentials, Symbol, Nil] The channel credentials.
 				# @parameter channel_override [Channel, Async::GRPC::Client | Nil] An existing compatible channel or client.
 				# @parameter timeout [Numeric | Nil] The default relative timeout in seconds.
 				# @parameter propagate_mask [Integer | Nil] Reserved for grpc-ruby compatibility.

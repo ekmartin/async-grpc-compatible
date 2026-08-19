@@ -4,6 +4,7 @@
 # Copyright, 2026, by Samuel Williams.
 
 require_relative "compatible/version"
+require_relative "compatible/channel_credentials"
 require_relative "compatible/client_stub"
 
 module Async

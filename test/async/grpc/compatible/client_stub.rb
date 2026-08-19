@@ -333,6 +333,14 @@ describe Async::GRPC::Compatible::ClientStub do
 			
 			expect(endpoint.to_url.to_s).to be == "https://grpc.example.com/"
 			expect(endpoint.protocol).to be == Async::HTTP::Protocol::HTTP2
+			expect(endpoint.tls_configuration).to be_nil
+		end
+		
+		it "forwards readable compatible channel credentials" do
+			credentials = Async::GRPC::Compatible::ChannelCredentials.new
+			endpoint = subject.endpoint_for("grpc.example.com:443", credentials)
+			
+			expect(endpoint.tls_configuration).to be_equal(credentials.tls_configuration)
 		end
 		
 		it "rejects invalid credentials" do

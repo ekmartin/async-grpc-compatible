@@ -22,5 +22,6 @@ Gem::Specification.new do |specification|
 	specification.required_ruby_version = ">= 3.3"
 	
 	specification.add_dependency "async-grpc", "~> 0.8"
+	specification.add_dependency "async-http", "~> 0.100"
 	specification.add_dependency "grpc"
 end

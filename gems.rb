@@ -7,7 +7,11 @@ source "https://rubygems.org"
 
 gemspec
 
-gem "async-grpc", path: "../async-grpc"
+local_async_grpc_path = File.expand_path("../async-grpc", __dir__)
+
+if File.directory?(local_async_grpc_path)
+	gem "async-grpc", path: local_async_grpc_path
+end
 
 group :maintenance, optional: true do
 	gem "bake-gem"

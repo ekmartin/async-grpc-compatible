@@ -7,6 +7,7 @@ require "async/grpc"
 require "async/http/endpoint"
 require "async/http/protocol/http2"
 require "base64"
+require "openssl"
 require "grpc"
 require "io/endpoint/tls/configuration"
 require "protocol/grpc/body/readable"
@@ -48,6 +49,25 @@ module Async
 			class ClientStub
 				INSECURE_CREDENTIALS = :this_channel_is_insecure
 				DEFAULT_TIMEOUT = nil
+				
+				# Transport failures which end a call without a gRPC status. grpc-ruby reports these as `UNAVAILABLE`.
+				TRANSPORT_ERRORS = [
+					::Protocol::HTTP::RefusedError,
+					::Protocol::HTTP2::Error,
+					::Protocol::HPACK::Error,
+					IOError,
+					SocketError,
+					SystemCallError,
+					OpenSSL::SSL::SSLError,
+				].freeze
+				
+				# The gRPC status for each HTTP/2 stream reset code, from gRPC's HTTP/2 status mapping. Other codes map to `INTERNAL`.
+				STREAM_RESET_STATUSES = {
+					::Protocol::HTTP2::Error::REFUSED_STREAM => ::GRPC::Core::StatusCodes::UNAVAILABLE,
+					::Protocol::HTTP2::Error::CANCEL => ::GRPC::Core::StatusCodes::CANCELLED,
+					::Protocol::HTTP2::Error::ENHANCE_YOUR_CALM => ::GRPC::Core::StatusCodes::RESOURCE_EXHAUSTED,
+					::Protocol::HTTP2::Error::INADEQUATE_SECURITY => ::GRPC::Core::StatusCodes::PERMISSION_DENIED,
+				}.freeze
 				
 				# Build a compatible stub class for a generated GRPC::GenericService.
 				# @parameter service [Class] The generated service definition.
@@ -285,6 +305,13 @@ module Async
 						content_type: "application/grpc"
 					)
 					request = Protocol::HTTP::Request["POST", normalize_method(method), headers, body]
+					payload = perform_request(request, operation)
+					
+					payload ? unmarshal.call(payload) : nil
+				end
+				
+				# Send the request and read its response payload. Application callbacks run outside this method, so their errors are not treated as transport failures.
+				def perform_request(request, operation)
 					response = @channel.client.call(request)
 					
 					begin
@@ -302,10 +329,18 @@ module Async
 						)
 						check_status!(response)
 						
-						payload ? unmarshal.call(payload) : nil
+						payload
 					ensure
 						response.close
 					end
+				rescue ::Protocol::HTTP2::StreamError => error
+					status = STREAM_RESET_STATUSES.fetch(error.code, ::GRPC::Core::StatusCodes::INTERNAL)
+					raise_bad_status(status, error.message, {}, cause: error)
+				rescue ::Protocol::HTTP::RemoteError => error
+					# The peer reset the stream with `INTERNAL_ERROR`:
+					raise_bad_status(::GRPC::Core::StatusCodes::INTERNAL, error.message, {}, cause: error)
+				rescue *TRANSPORT_ERRORS => error
+					raise_bad_status(::GRPC::Core::StatusCodes::UNAVAILABLE, error.message, {}, cause: error)
 				end
 				
 				def check_status!(response)

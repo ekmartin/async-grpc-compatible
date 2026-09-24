@@ -10,7 +10,6 @@ require "base64"
 require "openssl"
 require "grpc"
 require "io/endpoint/tls/configuration"
-require "openssl"
 require "protocol/grpc/body/readable"
 require "protocol/grpc/body/writable"
 require "protocol/grpc/metadata"
@@ -52,7 +51,7 @@ module Async
 			#
 			# Each thread has its own client because an Async connection pool belongs to a single reactor.
 			class SharedChannel < Channel
-				# @returns [Hash] The current thread's shared clients, keyed by URL and TLS configuration digest.
+				# @returns [Hash] The current thread's shared clients, keyed by URL and TLS configuration.
 				def self.clients
 					::Thread.current.async_grpc_compatible_shared_clients ||= {}
 				end
@@ -68,14 +67,14 @@ module Async
 				
 				# Initialize a shared channel for the given URL and TLS configuration.
 				#
-				# The channel copies the TLS configuration, so later changes by the caller do not affect shared clients. Its key contains a digest of the TLS configuration rather than its private key.
+				# The channel freezes a copy of the TLS configuration, so later changes by the caller do not affect shared clients.
 				#
 				# @parameter url [String] The remote `http` or `https` URL.
 				# @parameter tls_configuration [IO::Endpoint::TLS::Configuration | Nil] The TLS configuration for an `https` URL.
 				def initialize(url, tls_configuration = nil)
-					data = Marshal.dump(tls_configuration)
-					@endpoint = Async::HTTP::Endpoint.parse(url, protocol: Async::HTTP::Protocol::HTTP2, tls_configuration: Marshal.load(data))
-					@key = ["#{@endpoint.scheme}://#{@endpoint.authority}", OpenSSL::Digest::SHA256.hexdigest(data)]
+					tls_configuration = tls_configuration&.dup&.freeze
+					@endpoint = Async::HTTP::Endpoint.parse(url, protocol: Async::HTTP::Protocol::HTTP2, tls_configuration: tls_configuration)
+					@key = ["#{@endpoint.scheme}://#{@endpoint.authority}", tls_configuration]
 				end
 				
 				# @attribute [Async::GRPC::Client] The current thread's client for this endpoint.

@@ -448,6 +448,121 @@ describe Async::GRPC::Compatible::ClientStub do
 		end
 	end
 	
+	with "transport failures" do
+		def request_with(client)
+			subject.new("unused", nil, channel_override: Async::GRPC::Compatible::Channel.new(client: client)).request_response(
+				"/#{service_name}/Echo",
+				CompatibleMessage.new("Hello"),
+				CompatibleMessage.method(:encode),
+				CompatibleMessage.method(:decode),
+				return_op: true
+			)
+		end
+		
+		def request_failing_with(error)
+			failing_client = Object.new
+			failing_client.define_singleton_method(:call){|_request| raise error}
+			request_with(failing_client)
+		end
+		
+		[
+			[Errno::ECONNREFUSED.new("connect(2) for 127.0.0.1:1"), ::GRPC::Unavailable],
+			[Errno::ECONNRESET.new, ::GRPC::Unavailable],
+			[Errno::EPIPE.new, ::GRPC::Unavailable],
+			[EOFError.new("Stream closed before response headers were received!"), ::GRPC::Unavailable],
+			[IOError.new("Connection closed!"), ::GRPC::Unavailable],
+			[SocketError.new("getaddrinfo: Name or service not known"), ::GRPC::Unavailable],
+			[OpenSSL::SSL::SSLError.new("certificate verify failed"), ::GRPC::Unavailable],
+			[Protocol::HTTP::RefusedError.new("GOAWAY: request not processed."), ::GRPC::Unavailable],
+			[Protocol::HTTP2::GoawayError.new("Shutting down!", Protocol::HTTP2::Error::INTERNAL_ERROR), ::GRPC::Unavailable],
+			[Protocol::HTTP2::ProtocolError.new("Invalid frame!"), ::GRPC::Unavailable],
+			[Protocol::HPACK::Error.new("Invalid index!"), ::GRPC::Unavailable],
+			[Protocol::HTTP2::StreamError.for(Protocol::HTTP2::Error::REFUSED_STREAM), ::GRPC::Unavailable],
+			[Protocol::HTTP2::StreamError.for(Protocol::HTTP2::Error::CANCEL), ::GRPC::Cancelled],
+			[Protocol::HTTP2::StreamError.for(Protocol::HTTP2::Error::ENHANCE_YOUR_CALM), ::GRPC::ResourceExhausted],
+			[Protocol::HTTP2::StreamError.for(Protocol::HTTP2::Error::INADEQUATE_SECURITY), ::GRPC::PermissionDenied],
+			[Protocol::HTTP2::StreamError.for(Protocol::HTTP2::Error::PROTOCOL_ERROR), ::GRPC::Internal],
+			[Protocol::HTTP::RemoteError.new("Internal error!"), ::GRPC::Internal],
+		].each do |error, error_class|
+			it "maps #{error.class}: #{error.message} to #{error_class}" do
+				operation = request_failing_with(error)
+				
+				expect{operation.execute}.to raise_exception(error_class, message: be(:include?, error.message)).and(have_attributes(
+					cause: be(:equal?, error)
+				))
+				expect(operation.status.code).to be == error_class.new.code
+			end
+		end
+		
+		it "raises unavailable when the connection fails while reading the response" do
+			error = Errno::ECONNRESET.new
+			body = Protocol::HTTP::Body::Writable.new
+			body.close_write(error)
+			client = Object.new
+			client.define_singleton_method(:call){|_request| Protocol::HTTP::Response[200, {"content-type" => "application/grpc"}, body]}
+			
+			expect{request_with(client).execute}.to raise_exception(::GRPC::Unavailable).and(have_attributes(
+				cause: be(:equal?, error)
+			))
+		end
+		
+		it "raises unavailable when the connection is refused" do
+			server = TCPServer.new("127.0.0.1", 0)
+			port = server.local_address.ip_port
+			server.close
+			
+			direct_stub = subject.new("127.0.0.1:#{port}", :this_channel_is_insecure)
+			
+			expect do
+				direct_stub.request_response("/#{service_name}/Echo", CompatibleMessage.new("Hello"), CompatibleMessage.method(:encode), CompatibleMessage.method(:decode))
+			end.to raise_exception(::GRPC::Unavailable, message: be =~ /Connection refused/).and(have_attributes(
+				cause: be_a(Errno::ECONNREFUSED)
+			))
+		ensure
+			direct_stub&.close
+		end
+		
+		it "raises unavailable when the server closes the connection" do
+			server = TCPServer.new("127.0.0.1", 0)
+			acceptor = Async{server.accept.close}
+			direct_stub = subject.new("127.0.0.1:#{server.local_address.ip_port}", :this_channel_is_insecure)
+			
+			expect do
+				direct_stub.request_response("/#{service_name}/Echo", CompatibleMessage.new("Hello"), CompatibleMessage.method(:encode), CompatibleMessage.method(:decode))
+			end.to raise_exception(::GRPC::Unavailable).and(have_attributes(
+				cause: be_a(IOError).or(be_a(SystemCallError))
+			))
+		ensure
+			direct_stub&.close
+			acceptor&.stop
+			server&.close
+		end
+		
+		it "preserves application encoder errors" do
+			expect do
+				stub.request_response("/#{service_name}/Echo", CompatibleMessage.new("Hello"), ->(message){raise IOError, "Application encoder!"}, CompatibleMessage.method(:decode))
+			end.to raise_exception(IOError, message: be == "Application encoder!")
+		end
+	end
+	
+	with "a server which resets the stream after sending response headers" do
+		let(:app) do
+			Protocol::HTTP::Middleware.for do |request|
+				body = Protocol::HTTP::Body::Writable.new
+				body.write("\x00")
+				body.close_write(RuntimeError.new("Server failure!"))
+				
+				Protocol::HTTP::Response[200, {"content-type" => "application/grpc"}, body]
+			end
+		end
+		
+		it "maps the stream reset to an internal error" do
+			expect{request("Hello")}.to raise_exception(::GRPC::Internal).and(have_attributes(
+				cause: be_a(Protocol::HTTP2::StreamError).and(have_attributes(code: be == Protocol::HTTP2::Error::INTERNAL_ERROR))
+			))
+		end
+	end
+	
 	it "defers execution until the operation executes" do
 		operation = request("Hello", return_op: true)
 		expect(operation.status).to be_nil
@@ -525,6 +640,25 @@ describe Async::GRPC::Compatible::ClientStub do
 			gapic.close
 		end
 		
+		it "retries transport failures using the GAPIC retry policy" do
+			attempts = 0
+			mock(grpc_client) do |wrapper|
+				wrapper.wrap(:call) do |original, request|
+					attempts += 1
+					raise Errno::ECONNRESET if attempts == 1
+					original.call(request)
+				end
+			end
+			retry_policy = {retry_codes: [::GRPC::Core::StatusCodes::UNAVAILABLE], initial_delay: 0.001, max_delay: 0.001}
+			
+			response = gapic.call_rpc(:echo, CompatibleMessage.new("retried"), options: {retry_policy: retry_policy})
+			
+			expect(response.value).to be == "retried"
+			expect(attempts).to be == 2
+		ensure
+			gapic.close
+		end
+		
 		it "supports the generated service helper directly" do
 			generated = subject.for(GeneratedCompatibleService).new("unused", nil, channel_override: channel)
 			expect(generated.echo(CompatibleMessage.new("generated")).value).to be == "generated"
@@ -588,7 +722,9 @@ describe Async::GRPC::Compatible::ClientStub do
 			
 			expect do
 				direct_stub.request_response("/#{service_name}/Echo", CompatibleMessage.new("TLS"), CompatibleMessage.method(:encode), CompatibleMessage.method(:decode))
-			end.to raise_exception(OpenSSL::SSL::SSLError, message: be =~ /certificate verify failed/)
+			end.to raise_exception(::GRPC::Unavailable, message: be =~ /certificate verify failed/).and(have_attributes(
+				cause: be_a(OpenSSL::SSL::SSLError)
+			))
 		ensure
 			direct_stub&.close
 		end
@@ -601,7 +737,9 @@ describe Async::GRPC::Compatible::ClientStub do
 			
 			expect do
 				wrong_stub.request_response("/#{service_name}/Echo", CompatibleMessage.new("TLS"), CompatibleMessage.method(:encode), CompatibleMessage.method(:decode))
-			end.to raise_exception(OpenSSL::SSL::SSLError, message: be =~ /hostname mismatch/)
+			end.to raise_exception(::GRPC::Unavailable, message: be =~ /hostname mismatch/).and(have_attributes(
+				cause: be_a(OpenSSL::SSL::SSLError)
+			))
 		ensure
 			wrong_channel&.close
 		end
@@ -644,7 +782,9 @@ describe Async::GRPC::Compatible::ClientStub do
 				
 				expect do
 					direct_stub.request_response("/#{service_name}/Echo", CompatibleMessage.new("mTLS"), CompatibleMessage.method(:encode), CompatibleMessage.method(:decode))
-				end.to raise_exception(StandardError).and(be_a(OpenSSL::SSL::SSLError).or(be_a(EOFError)))
+				end.to raise_exception(::GRPC::Unavailable).and(have_attributes(
+					cause: be_a(OpenSSL::SSL::SSLError).or(be_a(IOError), be_a(SystemCallError))
+				))
 			ensure
 				direct_stub&.close
 			end

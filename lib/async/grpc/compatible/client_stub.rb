@@ -69,16 +69,6 @@ module Async
 					::Protocol::HTTP2::Error::INADEQUATE_SECURITY => ::GRPC::Core::StatusCodes::PERMISSION_DENIED,
 				}.freeze
 				
-				# Represents a response body which is never reported as empty. The gRPC body skips reading an empty body, which would hide the error from a failed stream.
-				class ResponseBody < ::Protocol::HTTP::Body::Wrapper
-					# @returns [Boolean] Always false, so that reads continue until the stream ends or fails.
-					def empty?
-						false
-					end
-				end
-				
-				private_constant :ResponseBody
-				
 				# Build a compatible stub class for a generated GRPC::GenericService.
 				# @parameter service [Class] The generated service definition.
 				# @returns [Class] A client stub with methods for the service's unary RPCs.
@@ -327,7 +317,6 @@ module Async
 					begin
 						operation.metadata = extract_metadata(Protocol::HTTP::Headers.new(response.headers.header.to_a, policy: Protocol::GRPC::HEADER_POLICY))
 						response_encoding = response.headers["grpc-encoding"]
-						response.body = ResponseBody.new(response.body) if response.body
 						response_body = Protocol::GRPC::Body::Readable.wrap(response, encoding: response_encoding)
 						payload = response_body&.read
 						response_body&.finish

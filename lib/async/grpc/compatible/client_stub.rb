@@ -190,7 +190,8 @@ module Async
 					end
 					
 					raise ArgumentError, "Target scheme must match the channel credentials!" unless url.start_with?("#{scheme}://")
-					url
+					
+					return url
 				end
 				
 				# Construct the TLS configuration for the given credentials.

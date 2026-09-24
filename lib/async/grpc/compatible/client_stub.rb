@@ -151,9 +151,11 @@ module Async
 						raise TypeError, "Channel override must be an Async::GRPC::Compatible::Channel or Async::GRPC::Client!"
 					end
 					
+					# grpc-ruby accepts string and symbol keys. Only fall back on nil, so an explicit false is preserved:
 					local_pool = channel_arguments[LOCAL_SUBCHANNEL_POOL]
 					local_pool = channel_arguments[LOCAL_SUBCHANNEL_POOL.to_sym] if local_pool.nil?
 					
+					# gRPC uses integer boolean flags (0/1). Ruby treats 0 as truthy, so check it explicitly:
 					if local_pool && local_pool != 0
 						Channel.new(endpoint_for(host, credentials, channel_arguments))
 					else
